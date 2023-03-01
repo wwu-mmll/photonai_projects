@@ -6,8 +6,8 @@
 
 ## Example usage of PHOTONAI container
 ```
-apptainer run docker://photonai-v2.3.0 --help
-apptainer run docker://photonai-v2.3.0 --folder ./MYPROJECT/ --task regression --pipeline basic
+apptainer run docker://photonai-analyzer-v2.3.0 --help
+apptainer run docker://photonai-analyzer-v2.3.0 --folder ./MYPROJECT/ --task regression --pipeline basic
 ```
 
 ## Example Usage of main.py
