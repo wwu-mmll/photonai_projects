@@ -24,7 +24,11 @@ def main(folder: Path = typer.Option(
              resolve_path=True,
              help="Path to project folder containing features and target."),
          task: Task = typer.Option(..., help="Specify type of the prediction task"),
-         pipeline: PhotonaiPipeline = typer.Option(..., help="Specify PHOTONAI pipeline.")):
+         pipeline: PhotonaiPipeline = typer.Option(..., help="Specify PHOTONAI pipeline."),
+         outer_cv: int = typer.Option(default=10, help="Number of outer folds."),
+         inner_cv: int = typer.Option(default=10, help="Number of inner folds."),
+         scaling: bool = typer.Option(True, help="Apply z-scaling of features?"),
+         imputation: bool = typer.Option(True, help="Apply feature imputation?")):
     """
     Run PHOTONAI Analysis
     """
@@ -32,6 +36,10 @@ def main(folder: Path = typer.Option(
     print(f"Folder: {folder}")
     print(f"Task: {task}")
     print(f"Pipeline: {pipeline}")
+    print(f"Outer CV: {outer_cv}")
+    print(f"Inner CV: {inner_cv}")
+    print(f"Scale features: {scaling}")
+    print(f"Impute features: {imputation}")
 
 
 if __name__ == "__main__":

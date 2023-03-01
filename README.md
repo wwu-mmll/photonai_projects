@@ -19,6 +19,12 @@ Options:
                                   [required]
   --pipeline [basic|advanced|ensemble]
                                   Specify PHOTONAI pipeline.  [required]
+  --outer-cv INTEGER              Number of outer folds.  [default: 10]
+  --inner-cv INTEGER              Number of inner folds.  [default: 10]
+  --scaling / --no-scaling        Apply z-scaling of features?  [default:
+                                  scaling]
+  --imputation / --no-imputation  Apply feature imputation?  [default:
+                                  imputation]
   --help                          Show this message and exit.
 
 ```
