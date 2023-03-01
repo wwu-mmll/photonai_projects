@@ -34,3 +34,4 @@ Options:
   --help                          Show this message and exit.
 
 ```
+![typer example](typer_rich_example.png)
