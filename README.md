@@ -4,7 +4,13 @@
 - main.py describes the run script that will be executed when running the container
 - main.py uses typer to create a CLI
 
-## Example Usage
+## Example usage of PHOTONAI container
+```
+apptainer run docker://photonai-v2.3.0 --help
+apptainer run docker://photonai-v2.3.0 --folder ./MYPROJECT/ --task regression --pipeline basic
+```
+
+## Example Usage of main.py
 ```
 (photonaiAnalysis) nils@Nilss-MBP photonaiAnalysis % python main.py --help                                                
 Usage: main.py [OPTIONS]
