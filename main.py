@@ -1,6 +1,7 @@
 import typer
 from enum import Enum
 from pathlib import Path
+import rich
 
 
 class PhotonaiPipeline(str, Enum):
