@@ -34,4 +34,9 @@ Options:
   --help                          Show this message and exit.
 
 ```
-![typer example](typer_rich_example.png)
+![typer example](static/typer_rich_example.png)
+
+# PHOTONAI Project Report
+Can be used to summarize results from multiple PHOTONAI analyses. Uses *datapane* to create a HTML website
+that visualizes the results.
+
