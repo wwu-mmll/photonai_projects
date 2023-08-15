@@ -164,6 +164,7 @@ Add project description here
     def collect_results(self):
         results = list()
         analysis_folders = glob(os.path.join(self.project_dir, '*/'))
+        analysis_folders = sorted(analysis_folders)
         for analysis in analysis_folders:
             if os.path.basename(os.path.dirname(analysis)) == 'plots':
                 continue
@@ -171,6 +172,25 @@ Add project description here
 
             handler = ResultsHandler()
             handler.load_from_file(os.path.join(folder, "photonai_results.json"))
+            pipe_infos = f"""
+# PHOTONAI Analysis Info  
+**Name**: {handler.results.name}  
+**PHOTONAI Version**: {handler.results.version}
+
+**No. of Samples**: {handler.results.hyperpipe_info.data['X_shape'][0]}  
+**No. of Features**: {handler.results.hyperpipe_info.data['X_shape'][1]}
+
+**Outer Cross-Validation**: {handler.results.hyperpipe_info.cross_validation['OuterCV']}  
+**Inner Cross-Validation**: {handler.results.hyperpipe_info.cross_validation['InnerCV']}
+
+**Hyperparameter Optimization**: {handler.results.hyperpipe_info.optimization['Optimizer']}  
+**Primary Evaluation Metric**: {handler.results.hyperpipe_info.optimization['BestConfigMetric']}
+ 
+"""
+            with open(os.path.join(folder, "hyperpipe_infos.md"), 'w') as file:
+                file.write(pipe_infos)
+
+            # save important results and infos on hyperpipe
             df = handler.get_performance_table()
             df.to_csv(os.path.join(folder, "metrics.csv"), index=False)
             df = df.iloc[-1, :]
@@ -216,9 +236,7 @@ Add project description here
                     "<img src='https://avatars.githubusercontent.com/u/63720198?s=400&u=17e0e95ba5f7a7a220cfaaadce784094f8429478&v=4' alt='drawing' width='100'/>"),
                     #"![](https://avatars.githubusercontent.com/u/63720198?s=400&u=17e0e95ba5f7a7a220cfaaadce784094f8429478&v=4)"),
                     dp.Text(file=self.md_file),
-                    columns=1),
-                self.add_header(header="Summary of PHOTONAI Analyses",
-                                content=[dp.DataTable(df, label="PHOTONAI Results", caption="Summary of PHOTONAI Analyses")])],
+                    columns=1)],
                  columns=1)
 
         descriptives_page = None
@@ -229,8 +247,8 @@ Add project description here
                                                  content=[dp.DataTable(desc_df, label="Descriptive Statistics")])
             data_table = self.add_header(header="Sample Data",
                                          content=[dp.DataTable(data_df, label="Sample Data")])
-            plot1 = self.add_header(header="Target Distribution", content=[dp.Media(file=os.path.join(self.plot_dir, 'sample__target_distribution.png'),
-                             label="Target Distribution")])
+            plot1 = self.add_header(header="target distribution", content=[dp.Media(file=os.path.join(self.plot_dir, 'sample__target_distribution.png'),
+                             label="target distribution")])
             plots = glob(os.path.join(self.plot_dir, '*'))
             dp_plots = list()
             dp_plots.append(plot1)
@@ -241,26 +259,69 @@ Add project description here
                     dp_plots.append(self.add_header(header=f"{os.path.basename(plot).split('sample__')[-1].split('.png')[0].replace('_', ' ')}",
                                                     content=[dp.Media(file=plot,
                              label=f"{os.path.basename(plot)}")]))
+            page_description = """
+This page summarizes descriptive statistics of the sample used in the ML analyses. The first table presents
+the phenotypic information on the sample. The second table summarizes descriptive statistics. The distribution
+of the main descriptive variables are illustrated below (separately for the groups in the predictive target). 
+            """
             descriptives_page = dp.Group(
                 label="Sample Descriptives",
-                blocks=[dp.Group(blocks=[data_table, descriptives_table], columns=1),
+                blocks=[dp.Group(blocks=[dp.Text(page_description), data_table, descriptives_table], columns=1),
                     dp.Group(blocks=dp_plots, columns=2)])
 
+        # results summary page
+        df_short_results = df[['analysis', 'balanced_accuracy', 'balanced_accuracy_sem']]
+        plt.figure(figsize=(10, 6))
+        summary_plot = sns.barplot(
+                    data=df_short_results, x="balanced_accuracy", y="analysis",
+                   color="#6597B8")
+        for index, row in df_short_results.iterrows():
+            plt.errorbar(
+                x=row['balanced_accuracy'],
+                y=index,
+                xerr=row['balanced_accuracy_sem'],
+                color='black',  # Match the point color
+                capsize=0,  # Size of the error bar caps
+                capthick=1,  # Thickness of the error bar caps
+            )
+        plt.xlabel("Balanced Accuracy")
+        plt.ylabel("Analyses")
+
+        summary_page = dp.Group(
+            label="PHOTONAI Results Summary",
+            blocks=[
+                self.add_header(header="Short Summary of PHOTONAI Analyses",
+                                content=[dp.Plot(summary_plot,
+                                                 label='Summary Plot',
+                                                 caption="Mean performance across folds. Error bars depict +- 1 SD.")]),
+                self.add_header(header="Detailed Summary of PHOTONAI Analyses",
+                                content=[dp.DataTable(df, label="PHOTONAI Results", caption="Summary of PHOTONAI Analyses")])],
+                 columns=1)
+
+        # individual photonai analysis results
         pipelines = list()
         for _, analysis in df.iterrows():
             pipe_results = pd.read_csv(os.path.join(analysis['photonai_folder'], 'metrics.csv'))
+            overall_pipe_results = pipe_results.iloc[-1, :]
+            pipe_results.drop([pipe_results.iloc[-1].name], axis=0, inplace=True)
             best_metric = pd.read_csv(os.path.join(analysis['photonai_folder'], 'best_metric.csv'))
 
-            best_metric_sem = pipe_results[best_metric['name'][0] + '_sem'].iloc[-1]
-            best_metric_group = dp.Group(blocks=[dp.BigNumber(heading=f"{best_metric['name'][0]}", value=f"{best_metric['value'][0]:.2%} [+-{best_metric_sem:.2%}]")],
-                                         columns=2)
-            pipelines.append(dp.Group(blocks=[
-                dp.Text(f"Results for: {analysis['analysis']}"),
-                best_metric_group,
-                dp.DataTable(pipe_results)], label=f"{analysis['analysis']}"))
-        pipe_page = dp.Select(blocks=pipelines, label="PHOTONAI Results", type=dp.SelectType.DROPDOWN)
+            overall_pipe_results = overall_pipe_results.drop(['best_config', 'fold', 'n_train', 'n_validation'])
+            primary_metric_group = dp.Group(blocks=[dp.BigNumber(heading=f"{best_metric['name'][0]}", value=f"{best_metric['value'][0]:.2} [+-{overall_pipe_results[best_metric['name'][0] + '_sem']:.2}]")],
+                                            columns=1)
 
-        report = dp.View(dp.Select(blocks=[project_page, descriptives_page, pipe_page]))
+            pipelines.append(dp.Group(blocks=[
+                dp.Group(blocks=[
+                dp.Text(file=os.path.join(analysis['photonai_folder'], "hyperpipe_infos.md")),
+                self.add_header(header="Primary Metric (Mean [SD])",
+                                content=[primary_metric_group])], columns=2),
+                self.add_header(header="PHOTONAI Results across Folds",
+                                content=[dp.DataTable(pipe_results)])], label=f"{analysis['analysis']}"))
+        pipe_page = dp.Group(blocks=[dp.Text("Choose analysis..."),
+                                     dp.Select(blocks=pipelines, type=dp.SelectType.DROPDOWN)],
+                             label="Detailed PHOTONAI Results")
+
+        report = dp.View(dp.Select(blocks=[project_page, descriptives_page, summary_page, pipe_page]))
         dp.save_report(report, path=os.path.join(self.project_dir, "report.html"), open=True)
 
 
