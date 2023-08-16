@@ -249,7 +249,7 @@ Add project description here
                                          content=[dp.DataTable(data_df, label="Sample Data")])
             plot1 = self.add_header(header="target distribution", content=[dp.Media(file=os.path.join(self.plot_dir, 'sample__target_distribution.png'),
                              label="target distribution")])
-            plots = glob(os.path.join(self.plot_dir, '*'))
+            plots = glob(os.path.join(self.plot_dir, 'sample__*'))
             dp_plots = list()
             dp_plots.append(plot1)
             for plot in plots:
