@@ -317,9 +317,13 @@ of the main descriptive variables are illustrated below (separately for the grou
                                 content=[primary_metric_group])], columns=2),
                 self.add_header(header="PHOTONAI Results across Folds",
                                 content=[dp.DataTable(pipe_results)])], label=f"{analysis['analysis']}"))
-        pipe_page = dp.Group(blocks=[dp.Text("Choose analysis..."),
-                                     dp.Select(blocks=pipelines, type=dp.SelectType.DROPDOWN)],
-                             label="Detailed PHOTONAI Results")
+        if len(pipelines) == 1:
+            pipe_page = dp.Group(blocks=pipelines,
+                                 label="Detailed PHOTONAI Results")
+        else:
+            pipe_page = dp.Group(blocks=[dp.Text("Choose analysis..."),
+                                         dp.Select(blocks=pipelines, type=dp.SelectType.DROPDOWN)],
+                                 label="Detailed PHOTONAI Results")
 
         report = dp.View(dp.Select(blocks=[project_page, descriptives_page, summary_page, pipe_page]))
         dp.save_report(report, path=os.path.join(self.project_dir, "report.html"), open=True)

@@ -1,1 +1,1 @@
-from report.reporter import PhotonaiProject
+from photonai_projects.report.reporter import PhotonaiProject
