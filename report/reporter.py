@@ -275,6 +275,7 @@ of the main descriptive variables are illustrated below (separately for the grou
         summary_plot = sns.barplot(
                     data=df_short_results, x="balanced_accuracy", y="analysis",
                    color="#6597B8")
+        plt.xlim([0.3, 1])
         for index, row in df_short_results.iterrows():
             plt.errorbar(
                 x=row['balanced_accuracy'],
@@ -284,6 +285,7 @@ of the main descriptive variables are illustrated below (separately for the grou
                 capsize=0,  # Size of the error bar caps
                 capthick=1,  # Thickness of the error bar caps
             )
+        plt.axvline(0.5, color='grey', linestyle='--')
         plt.xlabel("Balanced Accuracy")
         plt.ylabel("Analyses")
 
