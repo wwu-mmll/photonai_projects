@@ -192,6 +192,15 @@ Add project description here
 
             # save important results and infos on hyperpipe
             df = handler.get_performance_table()
+            # Get the columns that end with "_sem"
+            columns_to_rename = [col for col in df.columns if col.endswith('_sem')]
+
+            # Create a dictionary to map old column names to new column names
+            rename_mapping = {old_col: old_col.replace('_sem', '_sd') for old_col in columns_to_rename}
+
+            # Rename the columns in the DataFrame
+            df.rename(columns=rename_mapping, inplace=True)
+
             df.to_csv(os.path.join(folder, "metrics.csv"), index=False)
             df = df.iloc[-1, :]
             best_config_metric = handler.results.hyperpipe_info.best_config_metric
@@ -228,7 +237,7 @@ Add project description here
         blocks.extend(content)
         return dp.Group(blocks=blocks, columns=1)
 
-    def write_report(self):
+    def write_report(self, metric: str = "balanced_accuracy"):
         df = pd.read_csv(os.path.join(self.project_dir, 'summary.csv'))
         project_page = dp.Group(
             label="Project",
@@ -270,21 +279,22 @@ of the main descriptive variables are illustrated below (separately for the grou
                     dp.Group(blocks=dp_plots, columns=2)])
 
         # results summary page
-        df_short_results = df[['analysis', 'balanced_accuracy', 'balanced_accuracy_sem']]
+        df_short_results = df[['analysis', metric, f'{metric}_sd']]
+
         plt.figure(figsize=(10, 6))
         summary_plot = sns.barplot(
-                    data=df_short_results, x="balanced_accuracy", y="analysis",
+                    data=df_short_results, x=metric, y="analysis",
                    color="#6597B8")
         for index, row in df_short_results.iterrows():
             plt.errorbar(
-                x=row['balanced_accuracy'],
+                x=row[metric],
                 y=index,
-                xerr=row['balanced_accuracy_sem'],
+                xerr=row[f'{metric}_sd'],
                 color='black',  # Match the point color
                 capsize=0,  # Size of the error bar caps
                 capthick=1,  # Thickness of the error bar caps
             )
-        plt.xlabel("Balanced Accuracy")
+        plt.xlabel(metric.replace("_", " "))
         plt.ylabel("Analyses")
 
         summary_page = dp.Group(
@@ -307,7 +317,7 @@ of the main descriptive variables are illustrated below (separately for the grou
             best_metric = pd.read_csv(os.path.join(analysis['photonai_folder'], 'best_metric.csv'))
 
             overall_pipe_results = overall_pipe_results.drop(['best_config', 'fold', 'n_train', 'n_validation'])
-            primary_metric_group = dp.Group(blocks=[dp.BigNumber(heading=f"{best_metric['name'][0]}", value=f"{best_metric['value'][0]:.2} [+-{overall_pipe_results[best_metric['name'][0] + '_sem']:.2}]")],
+            primary_metric_group = dp.Group(blocks=[dp.BigNumber(heading=f"{best_metric['name'][0]}", value=f"{best_metric['value'][0]:.2} [+-{overall_pipe_results[best_metric['name'][0] + '_sd']:.2}]")],
                                             columns=1)
 
             pipelines.append(dp.Group(blocks=[
@@ -321,7 +331,10 @@ of the main descriptive variables are illustrated below (separately for the grou
                                      dp.Select(blocks=pipelines, type=dp.SelectType.DROPDOWN)],
                              label="Detailed PHOTONAI Results")
 
-        report = dp.View(dp.Select(blocks=[project_page, descriptives_page, summary_page, pipe_page]))
+        if descriptives_page is None:
+            report = dp.View(dp.Select(blocks=[project_page, summary_page, pipe_page]))
+        else:
+            report = dp.View(dp.Select(blocks=[project_page, descriptives_page, summary_page, pipe_page]))
         dp.save_report(report, path=os.path.join(self.project_dir, "report.html"), open=True)
 
 
