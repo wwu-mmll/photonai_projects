@@ -4,7 +4,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from glob import glob
-import datapane as dp
+import arakawa as ar
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import ttest_ind, chi2_contingency
@@ -222,20 +222,20 @@ Add project description here
         return current_photonai_folder
 
     def add_header(self, header: str, content: list):
-        dp_header = dp.Text(f"## {header}")
+        dp_header = ar.Text(f"## {header}")
         blocks = list()
         blocks.append(dp_header)
         blocks.extend(content)
-        return dp.Group(blocks=blocks, columns=1)
+        return ar.Group(blocks=blocks, columns=1)
 
     def write_report(self):
         df = pd.read_csv(os.path.join(self.project_dir, 'summary.csv'))
-        project_page = dp.Group(
+        project_page = ar.Group(
             label="Project",
-            blocks=[dp.Group(dp.Text(
+            blocks=[ar.Group(ar.Text(
                     "<img src='https://avatars.githubusercontent.com/u/63720198?s=400&u=17e0e95ba5f7a7a220cfaaadce784094f8429478&v=4' alt='drawing' width='100'/>"),
                     #"![](https://avatars.githubusercontent.com/u/63720198?s=400&u=17e0e95ba5f7a7a220cfaaadce784094f8429478&v=4)"),
-                    dp.Text(file=self.md_file),
+                    ar.Text(file=self.md_file),
                     columns=1)],
                  columns=1)
 
@@ -244,10 +244,10 @@ Add project description here
             data_df = pd.read_csv(os.path.join(self.project_dir, 'df_sample.csv'))
             desc_df = pd.read_csv(os.path.join(self.project_dir, 'sample_description.csv'))
             descriptives_table = self.add_header(header="Descriptive Statistics",
-                                                 content=[dp.DataTable(desc_df, label="Descriptive Statistics")])
+                                                 content=[ar.DataTable(desc_df, label="Descriptive Statistics")])
             data_table = self.add_header(header="Sample Data",
-                                         content=[dp.DataTable(data_df, label="Sample Data")])
-            plot1 = self.add_header(header="target distribution", content=[dp.Media(file=os.path.join(self.plot_dir, 'sample__target_distribution.png'),
+                                         content=[ar.DataTable(data_df, label="Sample Data")])
+            plot1 = self.add_header(header="target distribution", content=[ar.Media(file=os.path.join(self.plot_dir, 'sample__target_distribution.png'),
                              label="target distribution")])
             plots = glob(os.path.join(self.plot_dir, 'sample__*'))
             dp_plots = list()
@@ -257,17 +257,17 @@ Add project description here
                     continue
                 else:
                     dp_plots.append(self.add_header(header=f"{os.path.basename(plot).split('sample__')[-1].split('.png')[0].replace('_', ' ')}",
-                                                    content=[dp.Media(file=plot,
+                                                    content=[ar.Media(file=plot,
                              label=f"{os.path.basename(plot)}")]))
             page_description = """
 This page summarizes descriptive statistics of the sample used in the ML analyses. The first table presents
 the phenotypic information on the sample. The second table summarizes descriptive statistics. The distribution
 of the main descriptive variables are illustrated below (separately for the groups in the predictive target). 
             """
-            descriptives_page = dp.Group(
+            descriptives_page = ar.Group(
                 label="Sample Descriptives",
-                blocks=[dp.Group(blocks=[dp.Text(page_description), data_table, descriptives_table], columns=1),
-                    dp.Group(blocks=dp_plots, columns=2)])
+                blocks=[ar.Group(blocks=[ar.Text(page_description), data_table, descriptives_table], columns=1),
+                    ar.Group(blocks=dp_plots, columns=2)])
 
         # results summary page
         df_short_results = df[['analysis', 'balanced_accuracy', 'balanced_accuracy_sem']]
@@ -289,15 +289,15 @@ of the main descriptive variables are illustrated below (separately for the grou
         plt.xlabel("Balanced Accuracy")
         plt.ylabel("Analyses")
 
-        summary_page = dp.Group(
+        summary_page = ar.Group(
             label="PHOTONAI Results Summary",
             blocks=[
                 self.add_header(header="Short Summary of PHOTONAI Analyses",
-                                content=[dp.Plot(summary_plot,
+                                content=[ar.Plot(summary_plot,
                                                  label='Summary Plot',
                                                  caption="Mean performance across folds. Error bars depict +- 1 SD.")]),
                 self.add_header(header="Detailed Summary of PHOTONAI Analyses",
-                                content=[dp.DataTable(df, label="PHOTONAI Results", caption="Summary of PHOTONAI Analyses")])],
+                                content=[ar.DataTable(df, label="PHOTONAI Results", caption="Summary of PHOTONAI Analyses")])],
                  columns=1)
 
         # individual photonai analysis results
@@ -309,36 +309,24 @@ of the main descriptive variables are illustrated below (separately for the grou
             best_metric = pd.read_csv(os.path.join(analysis['photonai_folder'], 'best_metric.csv'))
 
             overall_pipe_results = overall_pipe_results.drop(['best_config', 'fold', 'n_train', 'n_validation'])
-            primary_metric_group = dp.Group(blocks=[dp.BigNumber(heading=f"{best_metric['name'][0]}", value=f"{best_metric['value'][0]:.2} [+-{overall_pipe_results[best_metric['name'][0] + '_sem']:.2}]")],
+            primary_metric_group = ar.Group(blocks=[ar.BigNumber(heading=f"{best_metric['name'][0]}", value=f"{best_metric['value'][0]:.2} [+-{overall_pipe_results[best_metric['name'][0] + '_sem']:.2}]")],
                                             columns=1)
 
-            pipelines.append(dp.Group(blocks=[
-                dp.Group(blocks=[
-                dp.Text(file=os.path.join(analysis['photonai_folder'], "hyperpipe_infos.md")),
+            pipelines.append(ar.Group(blocks=[
+                ar.Group(blocks=[
+                ar.Text(file=os.path.join(analysis['photonai_folder'], "hyperpipe_infos.md")),
                 self.add_header(header="Primary Metric (Mean [SD])",
                                 content=[primary_metric_group])], columns=2),
                 self.add_header(header="PHOTONAI Results across Folds",
-                                content=[dp.DataTable(pipe_results)])], label=f"{analysis['analysis']}"))
+                                content=[ar.DataTable(pipe_results)])], label=f"{analysis['analysis']}"))
         if len(pipelines) == 1:
-            pipe_page = dp.Group(blocks=pipelines,
+            pipe_page = ar.Group(blocks=pipelines,
                                  label="Detailed PHOTONAI Results")
         else:
-            pipe_page = dp.Group(blocks=[dp.Text("Choose analysis..."),
-                                         dp.Select(blocks=pipelines, type=dp.SelectType.DROPDOWN)],
+            pipe_page = ar.Group(blocks=[ar.Text("Choose analysis..."),
+                                         ar.Select(blocks=pipelines, type=ar.SelectType.DROPDOWN)],
                                  label="Detailed PHOTONAI Results")
 
-        report = dp.View(dp.Select(blocks=[project_page, descriptives_page, summary_page, pipe_page]))
-        dp.save_report(report, path=os.path.join(self.project_dir, "report.html"), open=True)
-
-
-if __name__ == "__main__":
-    from data_loader.data_loader import EegResponseData, Target, PreprocessingType, FrequencyBands, RestType
-    data_loader = EegResponseData(target=Target.responder)
-    df = data_loader.df
-    project = PhotonaiProject(name='ML_CPM_pipeline', directory='../../results')
-    project.collect_results()
-    project.save_sample_descriptives(df=df,
-                                     categorical_target=Target.responder,
-                                     continuous_covariates=['age', 'BDI'],
-                                     categorical_covariates=['sex'])
-    project.write_report()
+        #report = ar.View(ar.Select(blocks=[project_page, descriptives_page, summary_page, pipe_page]))
+        report = ar.View(ar.Select(blocks=[project_page, summary_page, pipe_page]))
+        ar.save_report(report, path=os.path.join(self.project_dir, "report.html"), open=True)
