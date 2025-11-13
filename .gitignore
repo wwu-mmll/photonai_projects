@@ -132,3 +132,4 @@ dmypy.json
 .idea
 
 examples/breast_cancer
+examples/example_project
