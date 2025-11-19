@@ -4,6 +4,8 @@ This page shows how to set up a simple PHOTONAI project using
 `PhotonaiProject`, run analyses, perform permutation tests, and
 statistically compare different analyses.
 
+You can find the in-depth documentation here: https://wwu-mmll.github.io/photonai_projects/
+
 ## Installation
 
 Install the package (and PHOTONAI) into your environment:
