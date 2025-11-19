@@ -1,0 +1,46 @@
+/* ---------------------------------------------------------
+   Light mode: pastel palette + deep green primary
+--------------------------------------------------------- */
+:root {
+  /* Deep green primary (buttons, header, links) */
+  --md-primary-fg-color: #2e5d50;
+  --md-primary-fg-color--light: #4f7d70;
+  --md-primary-fg-color--dark: #1e3f35;
+
+  /* Pastel teal accent (highlights, focus, active elements) */
+  --md-accent-fg-color: #9ad4c2;
+  --md-accent-fg-color--transparent: rgba(154, 212, 194, 0.2);
+
+  /* Pastel background tones */
+  --md-default-bg-color: #fafcff;           /* very soft off-white */
+  --md-default-fg-color: #2e3c42;
+  --md-default-fg-color--light: #5d6d74;
+
+  /* Code blocks (soft grey background) */
+  --md-code-bg-color: #f3f6f8;
+  --md-code-fg-color: #2a3a3f;
+}
+
+/* ---------------------------------------------------------
+   Dark mode: deep pine green + muted pastel highlights
+--------------------------------------------------------- */
+[data-md-color-scheme="slate"] {
+  --md-hue: 175; /* keeps greenish theme harmony */
+
+  /* Dark pine background */
+  --md-default-bg-color: #0f1a17;
+  --md-default-fg-color: #d8e3dd;
+  --md-default-fg-color--light: #a6b6b0;
+
+  /* Dark mode primary colors */
+  --md-primary-fg-color: #2e5d50;
+  --md-primary-fg-color--light: #4f7d70;
+  --md-primary-fg-color--dark: #1e3f35;
+
+  /* Soft pastel teal accent */
+  --md-accent-fg-color: #9ad4c2;
+
+  /* Code blocks */
+  --md-code-bg-color: #172421;
+  --md-code-fg-color: #dff7f0;
+}

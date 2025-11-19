@@ -14,7 +14,7 @@ for name, current_X in [('all_features', X), ('first_feature_set', X_1), ('secon
     project.add(name=name,
                 X=current_X,
                 y=y,
-                hyperpipe_script='/home/nwinter/PycharmProjects/photonai_projects/examples/hyperpipe_constructor.py',
+                hyperpipe_script='hyperpipe_constructor.py',
                 name_hyperpipe_constructor='create_hyperpipe')
 
 project.list_analyses()
