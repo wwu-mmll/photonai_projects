@@ -20,7 +20,8 @@ class PhotonaiProject:
         self.project_dir = os.path.join(self.directory, self.name.replace(" ", "_"))
         self.md_file = os.path.join(self.project_dir, 'README.md')
         self.plot_dir = os.path.join(self.project_dir, 'plots')
-
+        self.analysis_type = None
+        self.best_config_metric = None
         os.makedirs(self.project_dir, exist_ok=True)
 
         if not os.path.exists(self.md_file):
@@ -161,6 +162,35 @@ Add project description here
     def run(self, hyperpipe: Hyperpipe, X: np.ndarray, y: np.ndarray, feature_importances: bool = False):
         hyperpipe.fit(X, y)
 
+    @staticmethod
+    def metric_type(metric_name):
+        """
+        Check whether a metric name corresponds to a classification or regression metric.
+        """
+        classification_metrics = {
+            "accuracy", "balanced_accuracy", "f1", "f1_macro", "f1_micro",
+            "f1_weighted", "precision", "precision_macro", "precision_micro",
+            "precision_weighted", "recall", "recall_macro", "recall_micro",
+            "recall_weighted", "roc_auc", "roc_auc_ovr", "roc_auc_ovo",
+            "log_loss", "matthews_corrcoef", "jaccard", "jaccard_score",
+        }
+
+        regression_metrics = {
+            "r2", "neg_mean_absolute_error", "neg_mean_squared_error",
+            "neg_root_mean_squared_error", "neg_median_absolute_error",
+            "neg_mean_squared_log_error", "explained_variance",
+            "max_error", "mean_absolute_error", "mean_squared_error",
+            "median_absolute_error",
+        }
+
+        name = metric_name.lower()
+        if name in classification_metrics:
+            return "classification"
+        elif name in regression_metrics:
+            return "regression"
+        else:
+            return "unknown"
+
     def collect_results(self):
         results = list()
         analysis_folders = glob(os.path.join(self.project_dir, '*/'))
@@ -195,6 +225,8 @@ Add project description here
             df.to_csv(os.path.join(folder, "metrics.csv"), index=False)
             df = df.iloc[-1, :]
             best_config_metric = handler.results.hyperpipe_info.best_config_metric
+            self.analysis_type = self.metric_type(best_config_metric)
+            self.best_config_metric = best_config_metric
             best_metric = pd.DataFrame({'name': [best_config_metric],
                                        'value': [df[best_config_metric]]})
             best_metric.to_csv(os.path.join(folder, "best_metric.csv"))
@@ -230,6 +262,7 @@ Add project description here
 
     def write_report(self):
         df = pd.read_csv(os.path.join(self.project_dir, 'summary.csv'))
+
         project_page = ar.Group(
             label="Project",
             blocks=[ar.Group(ar.Text(
@@ -270,23 +303,25 @@ of the main descriptive variables are illustrated below (separately for the grou
                     ar.Group(blocks=dp_plots, columns=2)])
 
         # results summary page
-        df_short_results = df[['analysis', 'balanced_accuracy', 'balanced_accuracy_sem']]
+        df_short_results = df[['analysis', self.best_config_metric, f'{self.best_config_metric}_sem']]
         plt.figure(figsize=(10, 6))
         summary_plot = sns.barplot(
-                    data=df_short_results, x="balanced_accuracy", y="analysis",
+                    data=df_short_results, x=self.best_config_metric, y="analysis",
                    color="#6597B8")
-        plt.xlim([0.3, 1])
+        if self.analysis_type == 'classification':
+            plt.xlim([0.3, 1])
         for index, row in df_short_results.iterrows():
             plt.errorbar(
-                x=row['balanced_accuracy'],
+                x=row[self.best_config_metric],
                 y=index,
-                xerr=row['balanced_accuracy_sem'],
+                xerr=row[f'{self.best_config_metric}_sem'],
                 color='black',  # Match the point color
                 capsize=0,  # Size of the error bar caps
                 capthick=1,  # Thickness of the error bar caps
             )
-        plt.axvline(0.5, color='grey', linestyle='--')
-        plt.xlabel("Balanced Accuracy")
+        if self.analysis_type == 'classification':
+            plt.axvline(0.5, color='grey', linestyle='--')
+        plt.xlabel(f"{self.best_config_metric}")
         plt.ylabel("Analyses")
 
         summary_page = ar.Group(

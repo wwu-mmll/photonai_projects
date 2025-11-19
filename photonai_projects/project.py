@@ -221,7 +221,7 @@ eval "$(conda shell.bash hook)"
 conda activate {conda_env}
 
 
-python ../project.py --project-folder {self.project_folder} --analysis-name {name} --n-perms {n_perms} --slurm-job-id $SLURM_ARRAY_TASK_ID --n-perms-per-job {n_perms_per_job} --random-state {random_state}
+python ../project.py --project-folder ../../{self.project_folder} --analysis-name {name} --n-perms {n_perms} --slurm-job-id $SLURM_ARRAY_TASK_ID --n-perms-per-job {n_perms_per_job} --random-state {random_state}
 """
         with open(os.path.join(analysis_folder, "slurm_job.cmd"), "w") as text_file:
             text_file.write(cmd)
