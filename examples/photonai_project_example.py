@@ -11,11 +11,11 @@ X_2 = X[:, 3:6]
 project = PhotonaiProject(project_folder='example_project')
 
 for name, current_X in [('all_features', X), ('first_feature_set', X_1), ('second_feature_set', X_2)]:
-    project.add_analysis(name=name,
-                         X=current_X,
-                         y=y,
-                         hyperpipe_script='/home/nwinter/PycharmProjects/photonai_projects/examples/hyperpipe_constructor.py',
-                         name_hyperpipe_constructor='create_hyperpipe')
+    project.add(name=name,
+                X=current_X,
+                y=y,
+                hyperpipe_script='/home/nwinter/PycharmProjects/photonai_projects/examples/hyperpipe_constructor.py',
+                name_hyperpipe_constructor='create_hyperpipe')
 
 project.list_analyses()
 

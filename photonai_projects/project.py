@@ -5,8 +5,17 @@ import json
 import importlib.util
 import typer
 from pathlib import Path
+from typing import Iterable, Literal, Dict, Tuple
+from scipy import stats
+from itertools import combinations
 
 import numpy as np
+import pandas as pd
+
+from photonai.processing import ResultsHandler
+from photonai.processing.metrics import Scorer
+
+from photonai_projects.utils import find_latest_photonai_run
 
 
 class PhotonaiProject:
@@ -94,10 +103,10 @@ class PhotonaiProject:
             pipe.verbosity = -1
         return pipe
 
-    def add_analysis(self, name, X, y,
-                     hyperpipe_script: str,
-                     name_hyperpipe_constructor: str,
-                     **kwargs):
+    def add(self, name, X, y,
+            hyperpipe_script: str,
+            name_hyperpipe_constructor: str,
+            **kwargs):
         """
         Create a new analysis folder, save X and y, copy the hyperpipe script,
         and store the constructor function name in a metadata file.
@@ -144,6 +153,391 @@ class PhotonaiProject:
         perm_runs = range(n_perms)
         self._run_permutation_test(name=name, random_state=random_state, n_perms=n_perms,
                                    overwrite=overwrite, perm_runs=perm_runs)
+
+    def check_permutation_test(self, name: str, n_perms: int = 1000):
+        """Check which permutation runs have a photonai_results.json."""
+        perm_runs = range(n_perms)
+        perm_folder = Path(self.project_folder) / name / "permutations"
+
+        found_runs = [
+            int(folder.name)
+            for folder in perm_folder.iterdir()
+            if folder.is_dir() and (folder / "photonai_results.json").exists()
+        ]
+        missing_runs = sorted(set(perm_runs) - set(found_runs))
+        print(f"Found {len(found_runs)} permutation runs, {len(missing_runs)} are missing.")
+        return sorted(found_runs), missing_runs
+
+    def _load_true_fold_results(self, name: str) -> pd.DataFrame:
+        """Return per-outer-fold performance for an analysis."""
+        photonai_folder = find_latest_photonai_run(Path(self.project_folder) / name)
+        if photonai_folder is None:
+            raise FileNotFoundError(
+                f"No PHOTONAI run found for analysis {name} in {self.project_folder}"
+            )
+
+        handler = ResultsHandler()
+        handler.load_from_file(str(Path(photonai_folder) / "photonai_results.json"))
+        return pd.DataFrame(handler.get_performance_outer_folds())
+
+    def _load_true_results(self, name: str) -> pd.Series:
+        """Return mean performance across outer folds for an analysis."""
+        folds_df = self._load_true_fold_results(name)
+        return folds_df.mean(axis=0)
+
+    def _ensure_and_load_permutation_results(
+        self, name: str, n_perms: int = 1000
+    ) -> pd.DataFrame:
+        """
+        Make sure permutation_results.csv exists for this analysis,
+        then load and return it.
+        """
+        perm_results_file = Path(self.project_folder) / name / "permutation_results.csv"
+        if not perm_results_file.exists():
+            self.aggregate_permutation_test(name, n_perms)
+        return pd.read_csv(perm_results_file)
+
+    # -------------------------------------------------
+    # Permutation aggregation / p-values
+    # -------------------------------------------------
+    def aggregate_permutation_test(self, name: str, n_perms: int = 1000):
+        perm_folder = Path(self.project_folder) / name / "permutations"
+        valid_runs, missing_runs = self.check_permutation_test(name, n_perms)
+
+        outer_folds_metrics = []
+        for valid_run in valid_runs:
+            print(f"Aggregating results for permutation run {valid_run + 1}/{n_perms}")
+            handler = ResultsHandler()
+            handler.load_from_file(
+                str(perm_folder / str(valid_run) / "photonai_results.json")
+            )
+            mean_metrics = pd.DataFrame(
+                handler.get_performance_outer_folds()
+            ).mean(axis=0)
+            mean_metrics["run"] = valid_run
+            outer_folds_metrics.append(mean_metrics)
+
+        perm_results = pd.DataFrame(outer_folds_metrics)
+
+        # Ensure all runs 0..n_perms-1 are represented
+        df_perm_index = pd.DataFrame(
+            np.arange(n_perms), columns=["run"], index=np.arange(n_perms)
+        )
+        perm_results = pd.merge(df_perm_index, perm_results, on="run", how="left")
+
+        for metric in list(perm_results.keys()):
+            if metric == "run":
+                continue
+            greater_is_better = Scorer.greater_is_better_distinction(metric)
+            if greater_is_better:
+                perm_results[metric] = perm_results[metric].fillna(np.inf)
+            else:
+                perm_results[metric] = perm_results[metric].fillna(-np.inf)
+
+        perm_results.to_csv(
+            Path(self.project_folder) / name / "permutation_results.csv", index=False
+        )
+
+    def calculate_permutation_p_values(self, name: str, n_perms: int = 1000):
+        true_results = self._load_true_results(name)
+        perm_results = self._ensure_and_load_permutation_results(name, n_perms)
+
+        p_values: Dict[str, float] = {}
+        for metric in list(true_results.keys()):
+            greater_is_better = Scorer.greater_is_better_distinction(metric)
+            current_perm_results = np.asarray(perm_results[metric], dtype=float)
+
+            if greater_is_better:
+                current_perm_results[np.isnan(current_perm_results)] = np.inf
+                p_values[metric] = (
+                    np.sum(true_results[metric] < current_perm_results) + 1
+                ) / (n_perms + 1)
+            else:
+                current_perm_results[np.isnan(current_perm_results)] = -np.inf
+                p_values[metric] = (
+                    np.sum(true_results[metric] > current_perm_results) + 1
+                ) / (n_perms + 1)
+
+            n_valid = n_perms - np.sum(np.isinf(current_perm_results))
+            print(
+                f"p-value for {metric}: {p_values[metric]} "
+                f"(based on n={n_valid} valid permutations)"
+            )
+
+        pd.DataFrame(p_values, index=[0]).to_csv(
+            Path(self.project_folder) / name / "permutation_p_values.csv", index=False
+        )
+
+    # -------------------------------------------------
+    # Nadeau–Bengio helper
+    # -------------------------------------------------
+    @staticmethod
+    def _nadeau_bengio_p_value(
+        diffs: np.ndarray, n_train: int, n_test: int,
+    ) -> Tuple[float, float]:
+        """
+        Nadeau & Bengio corrected resampled t-test on fold-wise differences.
+        diffs: array of score2 - score1 per fold.
+        Returns (p_value, t_stat). One-sided in the 'better' direction.
+        """
+        diffs = np.asarray(diffs, dtype=float)
+        k = len(diffs)
+        if k < 2:
+            return 1.0, 0.0  # not enough folds
+
+        mean_diff = np.mean(diffs)
+        var_diff = np.var(diffs, ddof=1)
+        rho = n_test / n_train
+        corrected_var = (1.0 / k + rho) * var_diff
+        if corrected_var <= 0:
+            return 1.0, 0.0
+
+        t_stat = mean_diff / np.sqrt(corrected_var)
+        df = k - 1
+
+        # two-sided p-value
+        p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df))
+        return p_value, t_stat
+
+    # -------------------------------------------------
+    # Comparison of two analyses
+    # -------------------------------------------------
+    def compare_analyses(
+        self,
+        first_analysis: str,
+        second_analysis: str,
+        method: Literal["nadeau-bengio", "permutation"] = "nadeau-bengio",
+        metric: str | None = None,
+        n_perms: int = 1000,
+        n_train: int | None = None,
+        n_test: int | None = None,
+        print_report: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Compare two analyses using either:
+        - Nadeau-Bengio corrected t-test on outer-fold scores, or
+        - permutation-based null distribution of differences.
+
+        Returns a DataFrame indexed by metric with p-values and effect sizes.
+        """
+        valid_methods = {"nadeau-bengio", "permutation"}
+        if method not in valid_methods:
+            raise ValueError(f"Invalid method '{method}'. Valid options are: {valid_methods}")
+
+        results: list[dict] = []
+
+        # ---------------- permutation-based comparison ----------------
+        if method == "permutation":
+            # Load true and permutation results for both analyses
+            true1 = self._load_true_results(first_analysis)
+            perm1 = self._ensure_and_load_permutation_results(first_analysis, n_perms)
+
+            true2 = self._load_true_results(second_analysis)
+            perm2 = self._ensure_and_load_permutation_results(second_analysis, n_perms)
+
+            # sanity check: runs aligned
+            if not np.array_equal(perm1["run"].values, perm2["run"].values):
+                raise ValueError("Permutation indices (run column) do not match between analyses.")
+
+            if metric is None:
+                metrics = set(true1.index).intersection(true2.index)
+            else:
+                metrics = [metric]
+            for metric in metrics:
+                greater_is_better = Scorer.greater_is_better_distinction(metric)
+
+                # true difference: analysis2 - analysis1
+                true_diff = float(true2[metric] - true1[metric])
+
+                # permutation differences per run
+                perm_diff = (
+                    np.asarray(perm2[metric], dtype=float)
+                    - np.asarray(perm1[metric], dtype=float)
+                )
+
+                if greater_is_better:
+                    perm_diff[np.isnan(perm_diff)] = np.inf
+                    p_val = (np.sum(true_diff < perm_diff) + 1) / (n_perms + 1)
+                else:
+                    perm_diff[np.isnan(perm_diff)] = -np.inf
+                    p_val = (np.sum(true_diff > perm_diff) + 1) / (n_perms + 1)
+
+                n_valid = n_perms - np.sum(np.isinf(perm_diff))
+                print(
+                    f"[permutation] {metric}: p={p_val}, "
+                    f"true_diff={true_diff} (n_valid={n_valid})"
+                )
+
+                results.append(
+                    {
+                        "metric": metric,
+                        "method": "permutation",
+                        "p_value": p_val,
+                        "effect": true_diff,          # analysis2 - analysis1
+                        "n_valid_perms": int(n_valid),
+                    }
+                )
+
+        # ---------------- Nadeau–Bengio comparison ----------------
+        elif method == "nadeau-bengio":
+            if n_train is None or n_test is None:
+                raise ValueError(
+                    "n_train and n_test must be provided for the Nadeau-Bengio test."
+                )
+
+            folds1 = self._load_true_fold_results(first_analysis)
+            folds2 = self._load_true_fold_results(second_analysis)
+
+            if metric is None:
+                metrics = set(folds1.columns).intersection(folds2.columns)
+            else:
+                metrics = [metric]
+            for metric in metrics:
+                # fold-wise differences: analysis2 - analysis1
+                diffs = folds2[metric].values - folds1[metric].values
+                p_val, t_stat = self._nadeau_bengio_p_value(
+                    diffs,
+                    n_train=n_train,
+                    n_test=n_test,
+                )
+                mean_diff = float(np.mean(diffs))
+
+                print(
+                    f"[nadeau-bengio] {metric}: p={p_val}, t={t_stat}, "
+                    f"A={folds1[metric].mean()}[{folds1[metric].std()}], B={folds2[metric].mean()}[{folds1[metric].std()}], mean_diff={mean_diff}"
+                )
+
+                results.append(
+                    {
+                        "metric": metric,
+                        "method": "nadeau-bengio",
+                        "p_value": p_val,
+                        "t_stat": t_stat,
+                        "effect": mean_diff,  # analysis2 - analysis1
+                        "n_folds": len(diffs),
+                    }
+                )
+
+        df = pd.DataFrame(results).set_index("metric")
+        if print_report:
+            self.print_comparison_report(first_analysis, second_analysis, df)
+        return df
+
+    def print_comparison_report(
+            self,
+            first_analysis: str,
+            second_analysis: str,
+            results_df: pd.DataFrame,
+    ):
+        """
+        Print a clean summary for the comparison of two analyses.
+        results_df is the output of compare_analyses(first_analysis, second_analysis).
+        """
+
+        # Load true per-fold results to get mean & std
+        folds1 = self._load_true_fold_results(first_analysis)
+        folds2 = self._load_true_fold_results(second_analysis)
+
+        print("\n" + "=" * 80)
+        print(f"COMPARISON REPORT: {first_analysis}  vs  {second_analysis}")
+        print("=" * 80)
+
+        for _, row in results_df.reset_index().iterrows():
+            metric = row["metric"]
+            method = row["method"]
+
+            true1 = folds1[metric]
+            true2 = folds2[metric]
+
+            mean1, std1 = true1.mean(), true1.std(ddof=1)
+            mean2, std2 = true2.mean(), true2.std(ddof=1)
+
+            diff = mean2 - mean1
+
+            print(f"\n--- Metric: {metric} ---")
+            print(f"{first_analysis}: mean={mean1:.4f}, std={std1:.4f}")
+            print(f"{second_analysis}: mean={mean2:.4f}, std={std2:.4f}")
+            print(f"Difference (second - first): {diff:.4f}")
+
+            print(f"\nMethod: {method}")
+
+            if method == "nadeau-bengio":
+                print(f"T-statistic: {row.get('t_stat', float('nan')):.4f}")
+                print(f"P-value:     {row['p_value']:.6f}")
+
+            elif method == "permutation":
+                print(f"P-value:     {row['p_value']:.6f}")
+                print(f"Valid perms: {row.get('n_valid_perms', 'N/A')}")
+
+            print("-" * 80)
+
+        print("\n")
+
+    def compare_multiple_analyses(
+            self,
+            analyses: Iterable[str],
+            method: Literal["nadeau-bengio", "permutation"] = "nadeau-bengio",
+            metric: str | None = None,
+            n_perms: int = 1000,
+            n_train: int | None = None,
+            n_test: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Compare all pairs of analyses using compare_analyses.
+
+        Parameters
+        ----------
+        analyses : iterable of str
+            Names of analyses (e.g. ["A", "B", "C", "D"]).
+        method : {"nadeau-bengio", "permutation"}
+            Which comparison method to use.
+        n_perms : int
+            Number of permutations (for permutation-based comparison).
+        n_train : int, optional
+            Number of training samples (for Nadeau-Bengio).
+        n_test : int, optional
+            Number of test samples (for Nadeau-Bengio).
+
+        Returns
+        -------
+        pd.DataFrame
+            Long-format table with one row per (metric, pair),
+            including p-values and effect sizes.
+        """
+        analyses = list(analyses)
+        if len(analyses) < 2:
+            raise ValueError("Need at least two analyses to compare.")
+
+        all_results = []
+
+        for first, second in combinations(analyses, 2):
+            print(f"Comparing '{first}' vs '{second}' using {method}...")
+            pair_df = self.compare_analyses(
+                first_analysis=first,
+                second_analysis=second,
+                method=method,
+                metric=metric,
+                n_perms=n_perms,
+                n_train=n_train,
+                n_test=n_test,
+                print_report=False
+            )
+
+            # Make sure we don't accidentally mutate the original
+            pair_df = pair_df.copy()
+            pair_df["first_analysis"] = first
+            pair_df["second_analysis"] = second
+
+            # move metric from index to column for stacking
+            pair_df = pair_df.reset_index()  # 'metric' becomes a column
+            all_results.append(pair_df)
+
+        if not all_results:
+            return pd.DataFrame()
+
+        result_df = pd.concat(all_results, ignore_index=True)
+
+        return result_df
 
     def _run_permutation_test(self, name: str, random_state: int = 15, n_perms: int = 1000, overwrite: bool = False,
                               perm_runs: range = range(1000)):
