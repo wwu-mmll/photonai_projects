@@ -5,6 +5,11 @@ repo_name: wwu-mmll/photonai_projects
 
 theme:
   name: material
+  favicon: images/favicon.svg
+  logo: images/favicon.svg
+  features:
+    - navigation.sections
+    - toc.integrate
   palette:
     - scheme: default
       primary: custom
@@ -23,9 +28,11 @@ extra_css:
   - stylesheets/pastel-theme.css
 
 nav:
-  - Home: index.md
+  - Overview: index.md
   - Getting started: getting-started.md
   - API Reference: api.md
+  - Examples:
+      - examples/breast-cancer.md
 
 plugins:
   - search

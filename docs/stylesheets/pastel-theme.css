@@ -24,23 +24,16 @@
 /* ---------------------------------------------------------
    Dark mode: deep pine green + muted pastel highlights
 --------------------------------------------------------- */
+/* -----------------------------
+   Dark mode custom background
+------------------------------*/
 [data-md-color-scheme="slate"] {
-  --md-hue: 175; /* keeps greenish theme harmony */
+  --md-default-bg-color: #1e2624;
+  --md-default-fg-color: #e2ebe8;
 
-  /* Dark pine background */
-  --md-default-bg-color: #0f1a17;
-  --md-default-fg-color: #d8e3dd;
-  --md-default-fg-color--light: #a6b6b0;
+  --md-primary-fg-color: #2e5d50;      /* your dark green */
+  --md-accent-fg-color: #9ad4c2;       /* pastel teal */
 
-  /* Dark mode primary colors */
-  --md-primary-fg-color: #2e5d50;
-  --md-primary-fg-color--light: #4f7d70;
-  --md-primary-fg-color--dark: #1e3f35;
-
-  /* Soft pastel teal accent */
-  --md-accent-fg-color: #9ad4c2;
-
-  /* Code blocks */
-  --md-code-bg-color: #172421;
-  --md-code-fg-color: #dff7f0;
+  --md-code-bg-color: #23302e;
+  --md-code-fg-color: #eaf6f3;
 }
