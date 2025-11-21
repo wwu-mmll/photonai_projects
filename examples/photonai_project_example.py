@@ -17,15 +17,15 @@ for name, current_X in [('all_features', X), ('first_feature_set', X_1), ('secon
                 hyperpipe_script='hyperpipe_constructor.py',
                 name_hyperpipe_constructor='create_hyperpipe')
 
-project.list_analyses()
-
-# RUN PROJECT
-project.run(name='second_feature_set')
+    # RUN PROJECT
+    #project.run(name=name)
 
 # RUN PERM TEST LOCALLY
-project.run_permutation_test(name='second_feature_set', n_perms=10, overwrite=True)
+#project.run_permutation_test(name='second_feature_set', n_perms=10, overwrite=True)
 
 # RUN PERM TEST ON PALMA
-project.prepare_slurm_permutation_test(name='second_feature_set', n_perms=10,
-                                       conda_env='photonai2.5.2', memory_per_cpu=1, n_jobs=2, run_time="0-00:10:00",
-                                       random_state=1)
+#project.prepare_slurm_permutation_test(name='second_feature_set', n_perms=10,
+#                                       conda_env='photonai2.5.2', memory_per_cpu=1, n_jobs=2, run_time="0-00:10:00",
+#                                       random_state=1)
+
+project.generate_report()

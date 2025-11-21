@@ -7,7 +7,7 @@ def create_hyperpipe():
                         optimizer='grid_search',
                         metrics=['accuracy', 'precision', 'recall'],
                         best_config_metric='accuracy',
-                        outer_cv=KFold(n_splits=2),
+                        outer_cv=KFold(n_splits=10),
                         inner_cv=KFold(n_splits=2),
                         verbosity=1,
                         project_folder='')

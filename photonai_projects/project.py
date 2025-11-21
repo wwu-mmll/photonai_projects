@@ -16,6 +16,7 @@ from photonai.processing import ResultsHandler
 from photonai.processing.metrics import Scorer
 
 from photonai_projects.utils import find_latest_photonai_run
+from photonai_projects.reporter import Reporter
 
 
 class PhotonaiProject:
@@ -50,7 +51,7 @@ class PhotonaiProject:
         """
         self.project_folder = project_folder
         self.feature_importances = feature_importances
-
+        self.reporter = Reporter(self.project_folder)
         os.makedirs(self.project_folder, exist_ok=True)
 
     def run(self, name: str):
@@ -1073,6 +1074,10 @@ python ../project.py --project-folder ../../{self.project_folder} --analysis-nam
             text_file.write(cmd)
 
         return
+
+    def generate_report(self):
+        self.reporter.collect_results()
+        self.reporter.write_report()
 
 
 def run_perm_job(

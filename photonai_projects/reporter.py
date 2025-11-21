@@ -12,21 +12,20 @@ from scipy.stats import ttest_ind, chi2_contingency
 from photonai import Hyperpipe
 from photonai.processing import ResultsHandler
 
+from photonai_projects.utils import find_latest_photonai_run
 
-class PhotonaiProject:
-    def __init__(self, name: str, directory: str = '.'):
-        self.name = name
-        self.directory = directory
-        self.project_dir = os.path.join(self.directory, self.name.replace(" ", "_"))
-        self.md_file = os.path.join(self.project_dir, 'README.md')
-        self.plot_dir = os.path.join(self.project_dir, 'plots')
+
+class Reporter:
+    def __init__(self, project_folder):
+        self.project_folder = project_folder
+        self.md_file = os.path.join(self.project_folder, 'README.md')
+        self.plot_dir = os.path.join(self.project_folder, 'plots')
         self.analysis_type = None
         self.best_config_metric = None
-        os.makedirs(self.project_dir, exist_ok=True)
 
         if not os.path.exists(self.md_file):
             with open(self.md_file, 'w') as file:
-                content = f"""# PHOTONAI Project {self.name}
+                content = f"""# PHOTONAI Project {self.project_folder}
 
 Add project description here            
 """
@@ -129,7 +128,7 @@ Add project description here
                                  categorical_target: str,
                                  continuous_covariates: list,
                                  categorical_covariates: list):
-        df.to_csv(os.path.join(self.project_dir, 'df_sample.csv'), index=False)
+        df.to_csv(os.path.join(self.project_folder, 'df_sample.csv'), index=False)
 
         table = self.descriptive_sample_statistics(df,
                                               title="Descriptive statistics",
@@ -138,7 +137,7 @@ Add project description here
                                               continuous_variables=continuous_covariates,
                                               categorical_variables=categorical_covariates,
                                               lancet_format=False)
-        table.to_csv(os.path.join(self.project_dir, 'sample_description.csv'), index=False)
+        table.to_csv(os.path.join(self.project_folder, 'sample_description.csv'), index=False)
 
         # create plots describing the sample
         os.makedirs(self.plot_dir, exist_ok=True)
@@ -158,9 +157,6 @@ Add project description here
             plt.savefig(os.path.join(self.plot_dir, f'sample__{cov}_distribution.png'))
 
         return table
-
-    def run(self, hyperpipe: Hyperpipe, X: np.ndarray, y: np.ndarray, feature_importances: bool = False):
-        hyperpipe.fit(X, y)
 
     @staticmethod
     def metric_type(metric_name):
@@ -193,13 +189,15 @@ Add project description here
 
     def collect_results(self):
         results = list()
-        analysis_folders = glob(os.path.join(self.project_dir, '*/'))
+        analysis_folders = glob(os.path.join(self.project_folder, '*/'))
         analysis_folders = sorted(analysis_folders)
         for analysis in analysis_folders:
             if os.path.basename(os.path.dirname(analysis)) == 'plots':
                 continue
-            folder = self.find_latest_photonai_run(analysis)
+            folder = find_latest_photonai_run(analysis)
 
+            if folder is None:
+                continue
             handler = ResultsHandler()
             handler.load_from_file(os.path.join(folder, "photonai_results.json"))
             pipe_infos = f"""
@@ -238,20 +236,7 @@ Add project description here
             results.append(df)
         df = pd.DataFrame(results)
         df = df.drop(columns=['best_config', 'n_train', 'n_validation', 'fold'])
-        df.to_csv(os.path.join(self.project_dir, 'summary.csv'), index=False, float_format='%.4f')
-
-    @staticmethod
-    def find_latest_photonai_run(folder):
-        # find latest calculation of pipeline type
-        photonai_runs = glob(os.path.join(folder, "*/"))
-        dates = [datetime.strptime(name[-20:-1], '%Y-%m-%d_%H-%M-%S') for name in photonai_runs]
-        latest_date = max(dates)
-
-        current_photonai_folder = None
-        for tmp_folder in photonai_runs:
-            if latest_date.strftime('%Y-%m-%d_%H-%M-%S') in tmp_folder:
-                current_photonai_folder = tmp_folder
-        return current_photonai_folder
+        df.to_csv(os.path.join(self.project_folder, 'summary.csv'), index=False, float_format='%.4f')
 
     def add_header(self, header: str, content: list):
         dp_header = ar.Text(f"## {header}")
@@ -261,7 +246,7 @@ Add project description here
         return ar.Group(blocks=blocks, columns=1)
 
     def write_report(self):
-        df = pd.read_csv(os.path.join(self.project_dir, 'summary.csv'))
+        df = pd.read_csv(os.path.join(self.project_folder, 'summary.csv'))
 
         project_page = ar.Group(
             label="Project",
@@ -273,9 +258,9 @@ Add project description here
                  columns=1)
 
         descriptives_page = None
-        if os.path.exists(os.path.join(self.project_dir, "df_sample.csv")):
-            data_df = pd.read_csv(os.path.join(self.project_dir, 'df_sample.csv'))
-            desc_df = pd.read_csv(os.path.join(self.project_dir, 'sample_description.csv'))
+        if os.path.exists(os.path.join(self.project_folder, "df_sample.csv")):
+            data_df = pd.read_csv(os.path.join(self.project_folder, 'df_sample.csv'))
+            desc_df = pd.read_csv(os.path.join(self.project_folder, 'sample_description.csv'))
             descriptives_table = self.add_header(header="Descriptive Statistics",
                                                  content=[ar.DataTable(desc_df, label="Descriptive Statistics")])
             data_table = self.add_header(header="Sample Data",
@@ -325,7 +310,7 @@ of the main descriptive variables are illustrated below (separately for the grou
         plt.ylabel("Analyses")
 
         summary_page = ar.Group(
-            label="PHOTONAI Results Summary",
+            label="Results Summary",
             blocks=[
                 self.add_header(header="Short Summary of PHOTONAI Analyses",
                                 content=[ar.Plot(summary_plot,
@@ -356,12 +341,12 @@ of the main descriptive variables are illustrated below (separately for the grou
                                 content=[ar.DataTable(pipe_results)])], label=f"{analysis['analysis']}"))
         if len(pipelines) == 1:
             pipe_page = ar.Group(blocks=pipelines,
-                                 label="Detailed PHOTONAI Results")
+                                 label="Detailed Results")
         else:
             pipe_page = ar.Group(blocks=[ar.Text("Choose analysis..."),
                                          ar.Select(blocks=pipelines, type=ar.SelectType.DROPDOWN)],
-                                 label="Detailed PHOTONAI Results")
+                                 label="Detailed Results")
 
         #report = ar.View(ar.Select(blocks=[project_page, descriptives_page, summary_page, pipe_page]))
         report = ar.View(ar.Select(blocks=[project_page, summary_page, pipe_page]))
-        ar.save_report(report, path=os.path.join(self.project_dir, "report.html"), open=True)
+        ar.save_report(report, path=os.path.join(self.project_folder, "report.html"), open=True)
