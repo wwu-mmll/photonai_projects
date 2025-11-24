@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://wwu-mmll.github.io/photonai_projects/</loc>
+         <lastmod>2025-11-24</lastmod>
+    </url>
+    <url>
+         <loc>https://wwu-mmll.github.io/photonai_projects/api/</loc>
+         <lastmod>2025-11-24</lastmod>
+    </url>
+    <url>
+         <loc>https://wwu-mmll.github.io/photonai_projects/getting-started/</loc>
+         <lastmod>2025-11-24</lastmod>
+    </url>
+    <url>
+         <loc>https://wwu-mmll.github.io/photonai_projects/report/</loc>
+         <lastmod>2025-11-24</lastmod>
+    </url>
+    <url>
+         <loc>https://wwu-mmll.github.io/photonai_projects/examples/breast-cancer/</loc>
+         <lastmod>2025-11-24</lastmod>
+    </url>
+</urlset>
