@@ -118,6 +118,55 @@ project.run_permutation_test(name="first_feature_set", n_perms=1000)
 project.run_permutation_test(name="second_feature_set", n_perms=1000)
 ```
 
+### Sequential stopping
+
+Permutation testing is usually the most expensive part of a project, and most
+of that cost goes into confirming that analyses *without* signal have no
+signal. Passing `sequential_metric` stops sampling as soon as
+`max_exceedances` permutations have matched or beaten the observed value —
+the point beyond which no number of further permutations could yield a small
+p-value.
+
+```python
+project.run_permutation_test(
+    name="second_feature_set",
+    n_perms=1000,
+    sequential_metric="explained_variance",
+    stop_above_p=0.1,
+)
+```
+
+`stop_above_p=0.1` reads as: *stop as soon as it is clear the p-value is at
+least 0.1, and never before*. Anything that can still reach p < 0.1 runs to
+the full budget at full resolution, down to `1 / (n_perms + 1)`. **Power is
+unaffected** — only the analyses that were never going to be significant
+finish early.
+
+The threshold is the exceedance budget in disguise:
+
+    max_exceedances = stop_above_p * n_perms
+
+so `stop_above_p=0.1` with 1000 permutations is `max_exceedances=100`. Pass
+whichever you prefer, but not both. Note that a *smaller* threshold stops
+*later*: it takes more permutations to accumulate a larger budget.
+
+| stop_above_p | permutations used when the true p is... |
+|---|---|
+| | `0.99` / `0.50` / `0.15` / `0.05` / `0.001` |
+| 0.02 | 20 / 39 / 130 / 383 / 1000 |
+| 0.10 | 101 / 200 / 665 / 1000 / 1000 |
+
+The p-value follows Besag and Clifford (1991): `max_exceedances / L` if
+sampling stopped at permutation `L`, and the usual
+`(1 + exceedances) / (1 + n_perms)` otherwise. Both are valid p-values, so the
+saving costs nothing in validity.
+
+Note that the stopping rule watches one metric. When a run stops early,
+`calculate_permutation_p_values()` reports a p-value for that metric only:
+sampling stopped when *its* budget ran out, which says nothing about the
+others. The decision is recorded in `sequential_permutation.json` inside the
+analysis folder and can be inspected with `read_sequential_state()`.
+
 If you want to compare two PHOTONAI analyses, you can use the .compare_analyses() method which either uses
 the Nadeau-Bengio corrected t-test or relies on the permutations that have been computed in the individual 
 significance test of each analysis.
@@ -179,6 +228,80 @@ sbatch slurm_job.cmd
 
 Each array job will call the Typer CLI entry point run_perm_job and
 execute a subset of permutation runs.
+
+Sequential stopping works here too:
+
+```python
+project.prepare_slurm_permutation_test(
+    name="second_feature_set",
+    n_perms=1000,
+    conda_env="my_photonai_env",
+    memory_per_cpu=2,
+    n_jobs=20,
+    run_time="0-02:00:00",
+    random_state=1,
+    sequential_metric="explained_variance",
+    max_exceedances=20,
+)
+```
+
+Every array task checks the exceedance budget before doing any work and exits
+immediately if it is already spent.
+
+**A single array saves little on its own.** If SLURM starts all tasks at once,
+they all check before any results exist, find nothing, and each runs its full
+share. The saving is proportional to how much of the array is still *queued*
+when the budget runs out, which depends on partition contention rather than
+on anything you control.
+
+Use `prepare_staged_slurm_permutation_test` to make the saving reliable:
+
+```python
+project.prepare_staged_slurm_permutation_test(
+    name="second_feature_set",
+    n_perms=1000,
+    conda_env="my_photonai_env",
+    memory_per_cpu=2,
+    n_jobs_per_stage=10,
+    n_perms_per_stage=200,
+    sequential_metric="explained_variance",
+    stop_above_p=0.1,
+    run_time="0-02:00:00",
+)
+```
+
+This writes `slurm_stage.cmd` and `submit_stages.sh`. Submit with:
+
+```bash
+cd example_project/second_feature_set
+./submit_stages.sh
+```
+
+Each stage is an array job depending on the previous one, so by the time a
+later stage starts the earlier results are on disk and its tasks can see that
+the budget is spent. Size a stage at roughly the number of permutations a null
+analysis needs — about 200 for `stop_above_p=0.1` out of 1000.
+
+Later stages are still *scheduled* even once sampling has stopped; they simply
+exit within seconds. Queue slots are used, compute is not.
+
+To inspect or drive the decision yourself:
+
+```python
+status = project.sequential_status(
+    name="second_feature_set",
+    metric="explained_variance",
+    max_exceedances=100,
+    n_perms=1000,
+)
+print(status["n_perms_used"], status["p_value"], status["should_continue"])
+```
+
+Each completed run also writes a small `permutation_summary.json` holding only
+its mean outer-fold metrics. PHOTONAI's own results file runs to several
+megabytes, so the stopping rule reads these summaries instead — which is what
+makes checking after every permutation cheap. Runs from older versions are
+summarised on first read.
 
 ## Next steps
 See the Usage page for more details on:

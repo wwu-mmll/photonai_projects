@@ -5,7 +5,7 @@ import json
 import importlib.util
 import typer
 from pathlib import Path
-from typing import Iterable, Literal, Dict, Tuple
+from typing import Iterable, Literal, Dict, Optional, Tuple
 from scipy import stats
 from itertools import combinations
 
@@ -19,6 +19,16 @@ from photonai_projects.utils import find_latest_photonai_run
 from photonai_projects.reporter import Reporter
 
 
+# Records where a sequential permutation test stopped and why.
+SEQUENTIAL_STATE_FILE = "sequential_permutation.json"
+
+# Written next to each permutation run once it completes. PHOTONAI's own
+# results file holds every fold, config and prediction and runs to several
+# megabytes, so re-reading all of them to check a stopping rule is far too
+# expensive. This file holds only the mean outer-fold metrics.
+RUN_SUMMARY_FILE = "permutation_summary.json"
+
+
 class PhotonaiProject:
     """
     Manage and compare multiple PHOTONAI analyses within a single project folder.
@@ -26,10 +36,22 @@ class PhotonaiProject:
     This class helps you:
     - create and register new analyses,
     - run PHOTONAI hyperpipes on stored data,
-    - run permutation tests (locally or on SLURM),
+    - run permutation tests (locally or on SLURM), optionally with sequential
+      early stopping,
     - aggregate permutation results,
     - compute permutation-based p-values, and
     - statistically compare multiple analyses (Nadeau–Bengio and permutation-based).
+
+    Notes
+    -----
+    Permutation tests are the expensive part of a project, and most of that cost
+    is usually spent confirming that analyses without signal have no signal.
+    Passing ``sequential_metric`` to :meth:`run_permutation_test` enables the
+    sequential Monte Carlo procedure of Besag and Clifford (1991): sampling
+    stops as soon as ``max_exceedances`` permutations have matched or beaten the
+    observed value, at which point no number of further permutations could
+    produce a small p-value. Analyses that remain significant still use the full
+    budget, so power is unaffected — only the null analyses finish early.
     """
 
     def __init__(
@@ -272,6 +294,9 @@ class PhotonaiProject:
         n_perms: int = 1000,
         random_state: int = 15,
         overwrite: bool = False,
+        sequential_metric: Optional[str] = None,
+        stop_above_p: Optional[float] = None,
+        max_exceedances: Optional[int] = None,
     ) -> None:
         """
         Run a local permutation test for a given analysis.
@@ -287,6 +312,20 @@ class PhotonaiProject:
         overwrite : bool, optional
             If True, overwrite existing permutation results. If False,
             skip permutations that already have results, by default False.
+        sequential_metric : str, optional
+            If given, stop early once `max_exceedances` permutation runs have
+            reached or beaten the observed value of this metric. An analysis
+            without signal reaches that point quickly, so most of the budget is
+            spent only on analyses that can still turn out significant. The
+            p-value remains valid; see :meth:`sequential_p_value`.
+        stop_above_p : float, optional
+            Stop as soon as it is clear the p-value is at least this large, and
+            never before. ``0.1`` means an analysis that cannot reach p < 0.1
+            is abandoned, while anything still able to is run to the full
+            budget. Give this or `max_exceedances`, not both.
+        max_exceedances : int, optional
+            The same rule expressed as an exceedance count; equals
+            ``stop_above_p * n_perms``.
         """
         perm_runs = range(n_perms)
         self._run_permutation_test(
@@ -295,6 +334,9 @@ class PhotonaiProject:
             n_perms=n_perms,
             overwrite=overwrite,
             perm_runs=perm_runs,
+            sequential_metric=sequential_metric,
+            stop_above_p=stop_above_p,
+            max_exceedances=max_exceedances,
         )
 
     def check_permutation_test(
@@ -408,8 +450,376 @@ class PhotonaiProject:
         return pd.read_csv(perm_results_file)
 
     # -------------------------------------------------
+    # Sequential permutation testing
+    # -------------------------------------------------
+    @staticmethod
+    def resolve_exceedance_budget(n_perms: int,
+                                  stop_above_p: Optional[float] = None,
+                                  max_exceedances: Optional[int] = None) -> int:
+        """
+        Translate a stopping threshold into an exceedance budget.
+
+        Sampling can only stop early once the p-value has reached
+        ``max_exceedances / n_perms``, so the two parameters are the same thing
+        expressed differently::
+
+            max_exceedances = stop_above_p * n_perms
+
+        Choosing ``stop_above_p=0.1`` with 1000 permutations therefore means
+        "stop as soon as it is clear the p-value is at least 0.1, and never
+        before", which is usually the way one wants to think about it.
+
+        Parameters
+        ----------
+        n_perms : int
+            Total number of permutations planned.
+        stop_above_p : float, optional
+            The p-value above which sampling may stop. Must lie in (0, 1].
+        max_exceedances : int, optional
+            The exceedance budget, given directly.
+
+        Returns
+        -------
+        int
+            The exceedance budget to use, at least 1.
+
+        Raises
+        ------
+        ValueError
+            If both or neither parameter is given, or `stop_above_p` is outside
+            (0, 1].
+        """
+        if (stop_above_p is None) == (max_exceedances is None):
+            raise ValueError("Give exactly one of 'stop_above_p' or "
+                             "'max_exceedances'.")
+
+        if max_exceedances is not None:
+            if max_exceedances < 1:
+                raise ValueError("max_exceedances must be at least 1.")
+            return int(max_exceedances)
+
+        if not 0 < stop_above_p <= 1:
+            raise ValueError(f"stop_above_p must be in (0, 1], got {stop_above_p}.")
+
+        # ceil, so the realised threshold is never below the one requested
+        return max(1, int(np.ceil(stop_above_p * n_perms)))
+
+    @staticmethod
+    def _is_at_least_as_extreme(observed: float,
+                                permuted: np.ndarray,
+                                greater_is_better: bool) -> np.ndarray:
+        """
+        Flag permutation results that are at least as extreme as the observed one.
+
+        Missing values count as extreme. A permutation run whose metric could
+        not be computed is treated as evidence against the alternative, which
+        keeps the resulting p-value conservative.
+
+        Parameters
+        ----------
+        observed : float
+            Metric value obtained with the true targets.
+        permuted : numpy.ndarray
+            Metric values obtained under permutation.
+        greater_is_better : bool
+            Whether larger values of the metric indicate better performance.
+
+        Returns
+        -------
+        numpy.ndarray of bool
+            One flag per permutation run.
+        """
+        permuted = np.asarray(permuted, dtype=float)
+        missing = np.isnan(permuted)
+
+        if greater_is_better:
+            extreme = permuted >= observed
+        else:
+            extreme = permuted <= observed
+
+        return extreme | missing
+
+    @staticmethod
+    def sequential_p_value(observed: float,
+                           permuted: Iterable[float],
+                           greater_is_better: bool,
+                           max_exceedances: int = 20,
+                           n_perms: int = 1000) -> Dict:
+        """
+        Sequential Monte Carlo p-value after Besag and Clifford (1991).
+
+        Permutation results are examined in the order they were generated and
+        counted whenever they are at least as extreme as the observed value.
+        Sampling stops as soon as `max_exceedances` such results have appeared,
+        because at that point the analysis cannot reach a small p-value however
+        many further permutations are drawn.
+
+        If sampling stopped early at the ``L``-th permutation, the p-value is
+        ``max_exceedances / L``. Otherwise it is the usual
+        ``(1 + exceedances) / (1 + n_perms)``. Both are valid p-values under the
+        null hypothesis, so the saving in computation costs no validity.
+
+        Permutations that were planned but never ran are counted as exceedances,
+        matching the conservative treatment of failed runs elsewhere in this
+        class.
+
+        Parameters
+        ----------
+        observed : float
+            Metric value obtained with the true targets.
+        permuted : iterable of float
+            Metric values under permutation, **in the order they were run**.
+            The order matters: it determines where sampling would have stopped.
+        greater_is_better : bool
+            Whether larger values of the metric indicate better performance.
+        max_exceedances : int, optional
+            Number of exceedances at which sampling stops, by default 20.
+            Larger values give a more precise p-value near the stopping region
+            at the cost of more permutations.
+        n_perms : int, optional
+            Total number of permutations planned, by default 1000.
+
+        Returns
+        -------
+        dict
+            With keys ``p_value``, ``stopped_early``, ``n_exceedances``,
+            ``n_perms_used`` (how many permutations were needed) and
+            ``n_perms_planned``.
+
+        References
+        ----------
+        Besag, J. and Clifford, P. (1991). Sequential Monte Carlo p-values.
+        Biometrika, 78(2), 301-304.
+
+        Examples
+        --------
+        A clearly null analysis stops long before the full budget:
+
+        >>> import numpy as np
+        >>> permuted = np.linspace(-0.05, 0.05, 1000)
+        >>> result = PhotonaiProject.sequential_p_value(
+        ...     observed=0.0, permuted=permuted, greater_is_better=True,
+        ...     max_exceedances=20, n_perms=1000)
+        >>> result['stopped_early']
+        True
+        """
+        if max_exceedances < 1:
+            raise ValueError("max_exceedances must be at least 1.")
+
+        permuted = np.asarray(list(permuted), dtype=float)
+
+        extreme = PhotonaiProject._is_at_least_as_extreme(
+            observed, permuted, greater_is_better)
+        cumulative = np.cumsum(extreme)
+
+        reached = np.flatnonzero(cumulative >= max_exceedances)
+        if reached.size:
+            # +1 converts the zero-based position into a count of permutations
+            n_used = int(reached[0]) + 1
+            return {'p_value': max_exceedances / n_used,
+                    'stopped_early': True,
+                    'n_exceedances': int(max_exceedances),
+                    'n_perms_used': n_used,
+                    'n_perms_planned': int(n_perms)}
+
+        # budget never exhausted: fall back to the standard estimator, counting
+        # permutations that were planned but never ran as exceedances
+        observed_exceedances = int(cumulative[-1]) if cumulative.size else 0
+        never_ran = max(0, n_perms - permuted.size)
+        total = observed_exceedances + never_ran
+
+        return {'p_value': (1 + total) / (1 + n_perms),
+                'stopped_early': False,
+                'n_exceedances': observed_exceedances,
+                'n_perms_used': int(permuted.size),
+                'n_perms_planned': int(n_perms)}
+
+    def sequential_status(self,
+                          name: str,
+                          metric: str,
+                          max_exceedances: int = 20,
+                          n_perms: int = 1000) -> Dict:
+        """
+        Report whether an analysis has already accumulated enough exceedances.
+
+        Reads the permutation runs computed so far and decides whether further
+        permutations can still change the conclusion. Use it between batches of
+        a staged permutation test to decide whether to submit the next batch.
+
+        Parameters
+        ----------
+        name : str
+            Name of the analysis.
+        metric : str
+            Metric the stopping rule is applied to, e.g. ``explained_variance``.
+        max_exceedances : int, optional
+            Number of exceedances at which sampling stops, by default 20.
+        n_perms : int, optional
+            Total number of permutations planned, by default 1000.
+
+        Returns
+        -------
+        dict
+            The result of :meth:`sequential_p_value` for the runs completed so
+            far, plus ``metric`` and ``should_continue``.
+        """
+        true_results = self._load_true_results(name)
+        if metric not in true_results.index:
+            raise KeyError(f"Metric '{metric}' not among the analysis metrics: "
+                           f"{list(true_results.index)}")
+
+        runs = self._collect_permutation_runs(name)
+        permuted = (runs.sort_values('run')[metric].to_numpy()
+                    if not runs.empty else np.array([]))
+
+        status = self.sequential_p_value(
+            observed=float(true_results[metric]),
+            permuted=permuted,
+            greater_is_better=Scorer.greater_is_better_distinction(metric),
+            max_exceedances=max_exceedances,
+            n_perms=n_perms)
+
+        status['metric'] = metric
+        status['should_continue'] = (not status['stopped_early']
+                                     and status['n_perms_used'] < n_perms)
+        return status
+
+    def _write_sequential_state(self, name: str, status: Dict) -> None:
+        """
+        Persist the sequential stopping decision for an analysis.
+
+        Parameters
+        ----------
+        name : str
+            Name of the analysis.
+        status : dict
+            Result of :meth:`sequential_status`.
+        """
+        path = Path(self.project_folder) / name / SEQUENTIAL_STATE_FILE
+        with open(path, 'w') as file:
+            json.dump(status, file, indent=2)
+
+    def read_sequential_state(self, name: str) -> Optional[Dict]:
+        """
+        Read the stored sequential stopping decision, if there is one.
+
+        Parameters
+        ----------
+        name : str
+            Name of the analysis.
+
+        Returns
+        -------
+        dict or None
+            The stored state, or None if the analysis was not run sequentially.
+        """
+        path = Path(self.project_folder) / name / SEQUENTIAL_STATE_FILE
+        if not path.exists():
+            return None
+        with open(path, 'r') as file:
+            return json.load(file)
+
+    # -------------------------------------------------
     # Permutation aggregation / p-values
     # -------------------------------------------------
+    @staticmethod
+    def _summarize_run(run_folder: Path) -> Optional[pd.Series]:
+        """
+        Read one permutation run's mean outer-fold metrics.
+
+        Prefers the small summary file. If it is absent — because the run
+        predates summaries, or was written by an older version — the full
+        PHOTONAI results file is parsed once and the summary is written for
+        next time.
+
+        Parameters
+        ----------
+        run_folder : pathlib.Path
+            Folder of a single permutation run.
+
+        Returns
+        -------
+        pandas.Series or None
+            Mean metrics with a ``run`` entry, or None if the run has no
+            results yet.
+        """
+        summary_file = run_folder / RUN_SUMMARY_FILE
+        if summary_file.exists():
+            try:
+                with open(summary_file, "r") as file:
+                    return pd.Series(json.load(file))
+            except (json.JSONDecodeError, OSError):
+                # a truncated summary (e.g. a job killed mid-write) is not
+                # worth failing over; fall through and rebuild it
+                pass
+
+        results_file = run_folder / "photonai_results.json"
+        if not results_file.exists():
+            return None
+
+        handler = ResultsHandler()
+        handler.load_from_file(str(results_file))
+        metrics = pd.DataFrame(handler.get_performance_outer_folds()).mean(axis=0)
+        metrics["run"] = int(run_folder.name)
+
+        PhotonaiProject._write_run_summary(run_folder, metrics)
+        return metrics
+
+    @staticmethod
+    def _write_run_summary(run_folder: Path, metrics: pd.Series) -> None:
+        """
+        Write the small per-run summary used by the sequential stopping rule.
+
+        Parameters
+        ----------
+        run_folder : pathlib.Path
+            Folder of a single permutation run.
+        metrics : pandas.Series
+            Mean outer-fold metrics, including a ``run`` entry.
+        """
+        try:
+            with open(run_folder / RUN_SUMMARY_FILE, "w") as file:
+                json.dump({key: float(value) for key, value in metrics.items()},
+                          file, indent=2)
+        except OSError:
+            # the summary is a cache, not a result: never fail a run over it
+            pass
+
+    def _collect_permutation_runs(self, name: str) -> pd.DataFrame:
+        """
+        Load the mean outer-fold metrics of every completed permutation run.
+
+        Reads the per-run summary files rather than PHOTONAI's full results,
+        which makes the sequential stopping check cheap enough to run after
+        every permutation.
+
+        Parameters
+        ----------
+        name : str
+            Name of the analysis.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per completed run with a ``run`` column, sorted by run
+            index. Empty if no run has completed.
+        """
+        perm_folder = Path(self.project_folder) / name / "permutations"
+        if not perm_folder.exists():
+            return pd.DataFrame()
+
+        rows = []
+        for folder in sorted(perm_folder.iterdir(), key=lambda f: f.name):
+            if not folder.is_dir():
+                continue
+            metrics = self._summarize_run(folder)
+            if metrics is not None:
+                rows.append(metrics)
+
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows).sort_values("run").reset_index(drop=True)
+
     def aggregate_permutation_test(self, name: str, n_perms: int = 1000) -> None:
         """
         Aggregate results from individual permutation runs into a single CSV file.
@@ -427,23 +837,7 @@ class PhotonaiProject:
         n_perms : int, optional
             Number of permutation runs, by default 1000.
         """
-        perm_folder = Path(self.project_folder) / name / "permutations"
-        valid_runs, missing_runs = self.check_permutation_test(name, n_perms)
-
-        outer_folds_metrics = []
-        for valid_run in valid_runs:
-            print(f"Aggregating results for permutation run {valid_run + 1}/{n_perms}")
-            handler = ResultsHandler()
-            handler.load_from_file(
-                str(perm_folder / str(valid_run) / "photonai_results.json")
-            )
-            mean_metrics = pd.DataFrame(
-                handler.get_performance_outer_folds()
-            ).mean(axis=0)
-            mean_metrics["run"] = valid_run
-            outer_folds_metrics.append(mean_metrics)
-
-        perm_results = pd.DataFrame(outer_folds_metrics)
+        perm_results = self._collect_permutation_runs(name)
 
         # Ensure all runs 0..n_perms-1 are represented
         df_perm_index = pd.DataFrame(
@@ -484,6 +878,28 @@ class PhotonaiProject:
             Number of permutation runs, by default 1000.
         """
         true_results = self._load_true_results(name)
+
+        sequential_state = self.read_sequential_state(name)
+        if sequential_state is not None and sequential_state["stopped_early"]:
+            # The run was cut short on purpose, so the missing permutations must
+            # not be counted as failures. Only the metric the stopping rule was
+            # applied to has a meaningful p-value here: sampling stopped when
+            # *that* metric ran out of budget, which says nothing about the
+            # others.
+            metric_name = sequential_state["metric"]
+            print(
+                f"'{name}' was stopped sequentially after "
+                f"{sequential_state['n_perms_used']} of "
+                f"{sequential_state['n_perms_planned']} permutations. "
+                f"Reporting the sequential p-value for '{metric_name}' only."
+            )
+            pd.DataFrame({metric_name: sequential_state["p_value"]},
+                         index=[0]).to_csv(
+                Path(self.project_folder) / name / "permutation_p_values.csv",
+                index=False,
+            )
+            return
+
         perm_results = self._ensure_and_load_permutation_results(name, n_perms)
 
         p_values: Dict[str, float] = {}
@@ -882,6 +1298,9 @@ class PhotonaiProject:
         n_perms: int = 1000,
         overwrite: bool = False,
         perm_runs: range = range(1000),
+        sequential_metric: Optional[str] = None,
+        stop_above_p: Optional[float] = None,
+        max_exceedances: Optional[int] = None,
     ) -> None:
         """
         Internal helper to run a subset of permutation tests for an analysis.
@@ -898,6 +1317,13 @@ class PhotonaiProject:
             Whether to overwrite existing permutation results, by default False.
         perm_runs : range, optional
             Iterable of permutation indices to run, by default range(1000).
+        sequential_metric : str, optional
+            Metric the sequential stopping rule is applied to. If None, all
+            requested permutations are computed.
+        stop_above_p : float, optional
+            p-value above which sampling may stop.
+        max_exceedances : int, optional
+            The same rule expressed as an exceedance count.
 
         Raises
         ------
@@ -914,9 +1340,27 @@ class PhotonaiProject:
         data_folder = os.path.join(analysis_folder, "data")
         perm_folder = os.path.join(analysis_folder, "permutations")
 
+        if sequential_metric is not None:
+            max_exceedances = self.resolve_exceedance_budget(
+                n_perms, stop_above_p, max_exceedances)
+
         # load data
         X = np.load(os.path.join(data_folder, "X.npy"))
         y = np.load(os.path.join(data_folder, "y.npy"))
+
+        # a previous batch may already have settled the question
+        if sequential_metric is not None:
+            status = self.sequential_status(name, sequential_metric,
+                                            max_exceedances, n_perms)
+            if status["stopped_early"]:
+                print(
+                    f"Sequential stopping: '{name}' already reached "
+                    f"{max_exceedances} exceedances of {sequential_metric} after "
+                    f"{status['n_perms_used']} permutations "
+                    f"(p = {status['p_value']:.4f}). Skipping this batch."
+                )
+                self._write_sequential_state(name, status)
+                return
 
         for perm_run in perm_runs:
             current_perm_folder = os.path.join(perm_folder, str(perm_run))
@@ -953,6 +1397,22 @@ class PhotonaiProject:
             )
             shutil.rmtree(pipe.output_settings.results_folder)
 
+            # write the small summary now, while the results are already loaded
+            self._summarize_run(Path(current_perm_folder))
+
+            if sequential_metric is not None:
+                status = self.sequential_status(name, sequential_metric,
+                                                max_exceedances, n_perms)
+                self._write_sequential_state(name, status)
+                if status["stopped_early"]:
+                    print(
+                        f"Sequential stopping: {max_exceedances} exceedances of "
+                        f"{sequential_metric} reached after "
+                        f"{status['n_perms_used']} of {n_perms} permutations "
+                        f"(p = {status['p_value']:.4f}). Stopping."
+                    )
+                    return
+
     def run_permutation_test_slurm(
         self,
         name: str,
@@ -961,6 +1421,11 @@ class PhotonaiProject:
         overwrite: bool = False,
         slurm_job_id: int | None = None,
         n_perms_per_job: int | None = None,
+        stage: int = 1,
+        n_jobs_per_stage: int = 0,
+        sequential_metric: Optional[str] = None,
+        stop_above_p: Optional[float] = None,
+        max_exceedances: Optional[int] = None,
     ) -> None:
         """
         Run a subset of permutation tests for use in a SLURM array job.
@@ -979,17 +1444,37 @@ class PhotonaiProject:
             Index of the SLURM array job (starting at 1).
         n_perms_per_job : int or None, optional
             Number of permutations to run in this job.
+        stage : int, optional
+            1-based stage index for staged runs, by default 1.
+        n_jobs_per_stage : int, optional
+            Array size of one stage; needed to make permutation indices unique
+            across stages. Defaults to 0, meaning a single unstaged array.
+        sequential_metric : str, optional
+            Metric the sequential stopping rule is applied to. Array tasks that
+            start after the budget has been exhausted exit immediately, so the
+            saving grows with how much of the array is still queued.
+        stop_above_p : float, optional
+            p-value above which sampling may stop.
+        max_exceedances : int, optional
+            The same rule expressed as an exceedance count.
         """
+        # In a staged run the array restarts at 1 each stage, so the stage
+        # offset is what makes the permutation indices globally unique.
+        global_job_id = (stage - 1) * n_jobs_per_stage + slurm_job_id if n_jobs_per_stage else slurm_job_id
         perms_to_do = np.arange(
-            (slurm_job_id - 1) * n_perms_per_job,
-            (slurm_job_id - 1) * n_perms_per_job + n_perms_per_job,
+            (global_job_id - 1) * n_perms_per_job,
+            (global_job_id - 1) * n_perms_per_job + n_perms_per_job,
         )
+        perms_to_do = perms_to_do[perms_to_do < n_perms]
         self._run_permutation_test(
             name=name,
             random_state=random_state,
             n_perms=n_perms,
             overwrite=overwrite,
             perm_runs=perms_to_do,
+            sequential_metric=sequential_metric,
+            stop_above_p=stop_above_p,
+            max_exceedances=max_exceedances,
         )
 
     def prepare_slurm_permutation_test(
@@ -1001,6 +1486,9 @@ class PhotonaiProject:
         n_jobs: int,
         run_time: str = "0-01:00:00",
         random_state: int = 1,
+        sequential_metric: Optional[str] = None,
+        stop_above_p: Optional[float] = None,
+        max_exceedances: Optional[int] = None,
     ) -> None:
         """
         Prepare a SLURM job script for running permutation tests in parallel.
@@ -1027,6 +1515,13 @@ class PhotonaiProject:
             by default "0-01:00:00".
         random_state : int, optional
             Base random state, by default 1.
+        sequential_metric : str, optional
+            If given, the generated script enables sequential stopping on this
+            metric. Submit the array in stages for the largest saving: array
+            tasks check the exceedance budget before doing any work, so any task
+            still queued when the budget is spent exits immediately.
+        max_exceedances : int, optional
+            Exceedance budget for sequential stopping, by default 20.
 
         Raises
         ------
@@ -1041,6 +1536,15 @@ class PhotonaiProject:
         analysis_folder = os.path.join(self.project_folder, name)
         # calculate the number of perms per job
         n_perms_per_job = int(n_perms / n_jobs)
+
+        sequential_arguments = ""
+        if sequential_metric is not None:
+            budget = self.resolve_exceedance_budget(n_perms, stop_above_p,
+                                                    max_exceedances)
+            sequential_arguments = (
+                f" --sequential-metric {sequential_metric}"
+                f" --max-exceedances {budget}"
+            )
 
         # copy script that contains the permutation test
         shutil.copyfile(
@@ -1068,10 +1572,156 @@ eval "$(conda shell.bash hook)"
 conda activate {conda_env}
 
 
-python ../project.py --project-folder ../../{self.project_folder} --analysis-name {name} --n-perms {n_perms} --slurm-job-id $SLURM_ARRAY_TASK_ID --n-perms-per-job {n_perms_per_job} --random-state {random_state}
+python ../project.py --project-folder ../../{self.project_folder} --analysis-name {name} --n-perms {n_perms} --slurm-job-id $SLURM_ARRAY_TASK_ID --n-perms-per-job {n_perms_per_job} --random-state {random_state}{sequential_arguments}
 """
         with open(os.path.join(analysis_folder, "slurm_job.cmd"), "w") as text_file:
             text_file.write(cmd)
+
+        return
+
+    def prepare_staged_slurm_permutation_test(
+        self,
+        name: str,
+        n_perms: int,
+        conda_env: str,
+        memory_per_cpu: int,
+        n_jobs_per_stage: int,
+        n_perms_per_stage: int,
+        sequential_metric: str,
+        run_time: str = "0-01:00:00",
+        random_state: int = 1,
+        stop_above_p: Optional[float] = None,
+        max_exceedances: Optional[int] = None,
+    ) -> None:
+        """
+        Prepare a staged SLURM permutation test that can stop between stages.
+
+        A single large array gains little from sequential stopping: if every
+        task starts at once, they all check the budget before any results
+        exist and none of them can stop. Splitting the permutations into
+        stages fixes that. Each stage is an array job that depends on the
+        previous one, so by the time a later stage starts, the earlier results
+        are on disk. Its tasks check the budget before doing any work and exit
+        within seconds if it has been spent.
+
+        Stages are chained with ``--dependency=afterany`` rather than gated by
+        a separate job, which keeps the mechanism simple: later stages are
+        still scheduled, they just do nothing. The queue slots are wasted; the
+        compute is not.
+
+        Size a stage at roughly the number of permutations a null analysis
+        needs — about ``max_exceedances / 0.5`` if the null p-values sit near
+        0.5, so ~200 permutations for ``stop_above_p=0.1`` with 1000 planned.
+
+        Parameters
+        ----------
+        name : str
+            Name of the analysis.
+        n_perms : int
+            Total number of permutation runs across all stages.
+        conda_env : str
+            Conda environment to activate in the job.
+        memory_per_cpu : int
+            Memory per CPU in GB.
+        n_jobs_per_stage : int
+            Number of array tasks in each stage.
+        n_perms_per_stage : int
+            Number of permutations covered by each stage. Must be divisible by
+            `n_jobs_per_stage`.
+        sequential_metric : str
+            Metric the stopping rule is applied to.
+        run_time : str, optional
+            Wall time per array task, by default "0-01:00:00".
+        random_state : int, optional
+            Base random state, by default 1.
+        stop_above_p : float, optional
+            p-value above which sampling may stop.
+        max_exceedances : int, optional
+            The same rule expressed as an exceedance count.
+
+        Raises
+        ------
+        ValueError
+            If the analysis folder does not exist, or the stage sizes do not
+            divide evenly.
+        """
+        if name not in os.listdir(self.project_folder):
+            raise ValueError(
+                f"Analysis {name} not found in project folder {self.project_folder}"
+            )
+
+        if n_perms_per_stage % n_jobs_per_stage:
+            raise ValueError(
+                f"n_perms_per_stage ({n_perms_per_stage}) must be divisible by "
+                f"n_jobs_per_stage ({n_jobs_per_stage})."
+            )
+
+        budget = self.resolve_exceedance_budget(n_perms, stop_above_p,
+                                                max_exceedances)
+        n_perms_per_job = n_perms_per_stage // n_jobs_per_stage
+        n_stages = int(np.ceil(n_perms / n_perms_per_stage))
+
+        analysis_folder = os.path.join(self.project_folder, name)
+        os.makedirs(os.path.join(analysis_folder, "logs"), exist_ok=True)
+
+        shutil.copyfile(
+            os.path.abspath(__file__),
+            os.path.join(self.project_folder, os.path.basename(__file__)),
+        )
+
+        stage_script = f"""#!/bin/bash
+
+#SBATCH --job-name={name}_perm_stage
+#SBATCH --output=logs/stage_${{STAGE}}_job_%a.log
+
+#SBATCH --partition normal
+#SBATCH --mem-per-cpu={memory_per_cpu}G
+#SBATCH --time={run_time}
+#SBATCH --array=1-{n_jobs_per_stage}
+
+# add python
+module load palma/2021a
+module load Miniconda3
+
+# activate conda env
+eval "$(conda shell.bash hook)"
+conda activate {conda_env}
+
+python ../project.py --project-folder ../../{self.project_folder} \
+    --analysis-name {name} --n-perms {n_perms} \
+    --slurm-job-id $SLURM_ARRAY_TASK_ID --n-perms-per-job {n_perms_per_job} \
+    --random-state {random_state} --stage $STAGE \
+    --n-jobs-per-stage {n_jobs_per_stage} \
+    --sequential-metric {sequential_metric} --max-exceedances {budget}
+"""
+        with open(os.path.join(analysis_folder, "slurm_stage.cmd"), "w") as text_file:
+            text_file.write(stage_script)
+
+        submit_script = f"""#!/bin/bash
+# Submit {n_stages} dependent stages of {n_perms_per_stage} permutations each.
+#
+# Every stage waits for the previous one to finish, then checks whether the
+# exceedance budget for '{sequential_metric}' is already spent. If it is, its
+# tasks exit immediately instead of computing anything.
+
+set -euo pipefail
+
+PREVIOUS=""
+for STAGE in $(seq 1 {n_stages}); do
+    if [ -z "$PREVIOUS" ]; then
+        JOB=$(sbatch --parsable --export=ALL,STAGE=$STAGE slurm_stage.cmd)
+    else
+        JOB=$(sbatch --parsable --dependency=afterany:$PREVIOUS \
+                     --export=ALL,STAGE=$STAGE slurm_stage.cmd)
+    fi
+    echo "stage $STAGE submitted as job $JOB"
+    PREVIOUS=$JOB
+done
+"""
+        submit_path = os.path.join(analysis_folder, "submit_stages.sh")
+        with open(submit_path, "w") as text_file:
+            text_file.write(submit_script)
+        os.chmod(submit_path, 0o755)
 
         return
 
@@ -1109,6 +1759,29 @@ def run_perm_job(
     random_state: int = typer.Option(
         1, help="Base random state for permutation generation."
     ),
+    stage: int = typer.Option(
+        1, help="1-based stage index for staged permutation runs."
+    ),
+    n_jobs_per_stage: int = typer.Option(
+        0, help="Array size of one stage; 0 for a single unstaged array."
+    ),
+    sequential_metric: str = typer.Option(
+        None,
+        help=(
+            "Metric for sequential stopping. When set, a job exits without "
+            "computing anything if the exceedance budget is already spent."
+        ),
+    ),
+    stop_above_p: float = typer.Option(
+        None,
+        help=(
+            "Stop once it is clear the p-value is at least this large. "
+            "Give this or --max-exceedances, not both."
+        ),
+    ),
+    max_exceedances: int = typer.Option(
+        None, help="Exceedance budget, i.e. stop_above_p * n_perms."
+    ),
 ):
     """
     Entry point for SLURM-based permutation jobs.
@@ -1138,6 +1811,11 @@ def run_perm_job(
         slurm_job_id=slurm_job_id,
         n_perms_per_job=n_perms_per_job,
         random_state=random_state,
+        stage=stage,
+        n_jobs_per_stage=n_jobs_per_stage,
+        sequential_metric=sequential_metric,
+        stop_above_p=stop_above_p,
+        max_exceedances=max_exceedances,
     )
 
 
