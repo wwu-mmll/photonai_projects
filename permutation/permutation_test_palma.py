@@ -32,7 +32,7 @@ class PermutationTestPalma(PermutationTest):
                          random_state=random_state,
                          n_processes=1,
                          verbosity=1)
-        self.slurm_job_id = slurm_job_id
+        self.slurm_job_id = slurm_job_id - 1
         self.n_perms_per_job = n_perms_per_job
 
     def fit(self, X, y, **kwargs):
